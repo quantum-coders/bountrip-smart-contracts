@@ -1,0 +1,62 @@
+# Dependencias de Node.js
+node_modules/
+
+# Artefactos de compilación de NEAR
+build/
+neardev/
+
+# Archivos de registro
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Archivos generados por el sistema operativo
+.DS_Store
+Thumbs.db
+
+# Archivos de configuración de editores o IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Directorio opcional de caché de npm
+.npm/
+
+# Archivos de entorno
+.env
+.env.local
+.env.*.local
+
+# Salida de pruebas AVA u otras herramientas de pruebas
+coverage/
+test-results/
+reports/
+
+# Archivos temporales
+tmp/
+temp/
+*.tmp
+
+# Archivos de NEAR Sandbox
+/tmp/sandbox/
+sandbox/
+
+# Caché de TypeScript
+*.tsbuildinfo
+
+# Credenciales y configuraciones de NEAR
+.near-credentials/
+.near-config/
+
+# Archivos de bloqueo de paquetes
+package-lock.json
+yarn.lock
+
+# Otros archivos y directorios que desees ignorar
+*.swp
+*.swo
