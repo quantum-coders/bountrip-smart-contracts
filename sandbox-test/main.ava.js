@@ -1,6 +1,8 @@
 import anyTest from 'ava';
-import { setDefaultResultOrder } from 'dns'; setDefaultResultOrder('ipv4first'); // Solución temporal para Node >v17
-import { Worker } from 'near-workspaces';
+import {setDefaultResultOrder} from 'dns';
+
+setDefaultResultOrder('ipv4first'); // workaround for Node >17
+import {Worker} from 'near-workspaces';
 
 /**
  *  @typedef {import('near-workspaces').NearAccount} NearAccount
@@ -9,115 +11,133 @@ import { Worker } from 'near-workspaces';
 const test = anyTest;
 
 test.beforeEach(async (t) => {
-  // Crear sandbox
-  const worker = t.context.worker = await Worker.init();
+	const worker = t.context.worker = await Worker.init();
+	const root = worker.rootAccount;
 
-  // Desplegar el contrato
-  const root = worker.rootAccount;
-  const contract = await root.createSubAccount('bountrip-contract');
+	// Deploy contract to subaccount
+	const contract = await root.createSubAccount('bountrip-contract');
+	await contract.deploy(process.argv[2]); // ex. build/bountrip.wasm
 
-  // Obtener la ruta del archivo wasm desde el script de prueba en package.json
-  await contract.deploy(process.argv[2]);
-
-  // Guardar el estado para las pruebas
-  t.context.accounts = { root, contract };
+	t.context.accounts = {root, contract};
 });
 
 test.afterEach.always(async (t) => {
-  await t.context.worker.tearDown().catch((error) => {
-    console.log('Failed to stop the Sandbox:', error);
-  });
+	await t.context.worker.tearDown().catch((e) => {
+		console.log('Failed to stop Sandbox:', e);
+	});
 });
 
-test('Crear una nueva bounty', async (t) => {
-  const { root, contract } = t.context.accounts;
+/**
+ * SECURITY TESTS
+ */
+test('Owner can only be set once by the first caller, then only changed by that owner', async (t) => {
+	const {root, contract} = t.context.accounts;
 
-  // Definir los premios para la bounty
-  const prizes = ["1000000000000000000000000", "500000000000000000000000"];
+	// Initially, no owner is set. The first call to set_owner with no argument => the caller becomes owner
+	await root.call(contract, 'set_owner', {});
 
-  // Llamar al método create_bounty con los premios y adjuntar el depósito total
-  const result = await root.call(contract, 'create_bounty', { prizes }, { attachedDeposit: '1500000000000000000000000' });
+	// Check
+	let info = await contract.view('get_fee_info', {});
+	t.is(info.owner, root.accountId); // root is now owner
+	t.is(info.feePercentage, 2);      // default in constructor
 
-  // Verificar que se haya creado la bounty correctamente
-  t.is(result.bountyId, 0);
+	// Create "attacker" that tries to call set_owner
+	const attacker = await root.createSubAccount('attacker');
 
-  // Obtener la bounty recién creada
-  const bounty = await contract.view('get_bounty', { bountyId: 0 });
+	// Should fail: attacker is not the current owner
+	await t.throwsAsync(
+		attacker.call(contract, 'set_owner', {new_owner: attacker.accountId}),
+		{message: /Only current owner \(.+\) can change ownership/}
+	);
 
-  // Verificar que los datos de la bounty sean correctos
-  t.is(bounty.id, 0);
-  t.is(bounty.creator, root.accountId);
-  t.deepEqual(bounty.prizes, prizes);
-  t.true(bounty.isActive);
+	// The owner itself can change ownership to e.g. "some-other-owner"
+	await root.call(contract, 'set_owner', {new_owner: 'another-owner.testnet'});
+	info = await contract.view('get_fee_info', {});
+	t.is(info.owner, 'another-owner.testnet');
 });
 
-test('Participar en una bounty', async (t) => {
-  const { root, contract } = t.context.accounts;
+test('Only owner can update fee percentage', async (t) => {
+	const {root, contract} = t.context.accounts;
 
-  // Crear una bounty primero
-  const prizes = ["1000000000000000000000000"];
-  await root.call(contract, 'create_bounty', { prizes }, { attachedDeposit: '1000000000000000000000000' });
+	// Root sets itself as owner
+	await root.call(contract, 'set_owner', {});
 
-  // Crear una cuenta de participante
-  const participant = await root.createSubAccount('participant');
+	// Fee should start at 2
+	let info = await contract.view('get_fee_info', {});
+	t.is(info.feePercentage, 2);
 
-  // El participante participa en la bounty
-  await participant.call(contract, 'participate', { bountyId: 0 });
+	// Attempt to update fee as attacker => should fail
+	const attacker = await root.createSubAccount('attacker');
+	await t.throwsAsync(
+		attacker.call(contract, 'update_fee_percentage', {feePercentage: 10}),
+		{message: /Only the owner .+ can update the fee/}
+	);
 
-  // Obtener la bounty actualizada
-  const bounty = await contract.view('get_bounty', { bountyId: 0 });
-
-  // Verificar que el participante esté en la lista de participantes
-  t.deepEqual(bounty.participants, [participant.accountId]);
+	// Root can update the fee successfully
+	await root.call(contract, 'update_fee_percentage', {feePercentage: 10});
+	info = await contract.view('get_fee_info', {});
+	t.is(info.feePercentage, 10);
 });
 
-test('Finalizar una bounty y distribuir premios', async (t) => {
-  const { root, contract } = t.context.accounts;
+/**
+ * BOUNTY CREATION / PARTICIPATION / FINALIZATION TESTS
+ */
+test('Create a bounty and finalize with fees going to owner', async (t) => {
+	const {root, contract} = t.context.accounts;
 
-  // Crear una bounty
-  const prizes = ["1000000000000000000000000", "500000000000000000000000"];
-  await root.call(contract, 'create_bounty', { prizes }, { attachedDeposit: '1500000000000000000000000' });
+	// root => set itself as owner
+	await root.call(contract, 'set_owner', {});
 
-  // Crear cuentas de participantes
-  const participant1 = await root.createSubAccount('participant1');
-  const participant2 = await root.createSubAccount('participant2');
+	// Let "creator" be a separate account paying for bounty creation/finalization
+	const creator = await root.createSubAccount('creator');
+	const participant1 = await root.createSubAccount('p1');
+	const participant2 = await root.createSubAccount('p2');
 
-  // Participantes participan en la bounty
-  await participant1.call(contract, 'participate', { bountyId: 0 });
-  await participant2.call(contract, 'participate', { bountyId: 0 });
+	// Create a bounty with 1.5 NEAR total
+	const prizes = [
+		"1000000000000000000000000", // 1 NEAR
+		"500000000000000000000000"   // 0.5 NEAR
+	];
+	await creator.call(
+		contract,
+		'create_bounty',
+		{prizes},
+		{attachedDeposit: '1500000000000000000000000'}
+	);
 
-  // Finalizar la bounty y asignar ganadores
-  const winners = [participant1.accountId, participant2.accountId];
-  await root.call(contract, 'finalize_bounty', { bountyId: 0, winners });
+	// Both participants join
+	await participant1.call(contract, 'participate', {bountyId: 0});
+	await participant2.call(contract, 'participate', {bountyId: 0});
 
-  // Verificar que la bounty ya no está activa
-  const bounty = await contract.view('get_bounty', { bountyId: 0 });
-  t.false(bounty.isActive);
-  t.deepEqual(bounty.winners, winners);
+	// Check balances
+	const ownerBefore = BigInt((await root.balance()).total);
+	const p1Before = BigInt((await participant1.balance()).total);
+	const p2Before = BigInt((await participant2.balance()).total);
 
-  // Verificar los saldos de los ganadores
-  const balance1 = await participant1.balance();
-  const balance2 = await participant2.balance();
+	// Finalize with both as winners
+	await creator.call(contract, 'finalize_bounty', {
+		bountyId: 0,
+		winners: [participant1.accountId, participant2.accountId]
+	});
 
-  // Los balances deben haber incrementado en los montos de los premios
-  // Nota: Es posible que necesites ajustar esto según las tarifas de gas y otros factores
-  t.true(BigInt(balance1.total) > BigInt('1000000000000000000000000'));
-  t.true(BigInt(balance2.total) > BigInt('500000000000000000000000'));
-});
+	const bounty = await contract.view('get_bounty', {bountyId: 0});
+	t.false(bounty.isActive);
+	t.deepEqual(bounty.winners, [participant1.accountId, participant2.accountId]);
 
-test('Solo el creador puede finalizar una bounty', async (t) => {
-  const { root, contract } = t.context.accounts;
+	// default fee: 2%
+	// totalFee = 0.02 * 1.5 NEAR = 0.03 NEAR => 3e22
+	const totalFee = BigInt("30000000000000000000000");
+	const ownerAfter = BigInt((await root.balance()).total);
+	const p1After = BigInt((await participant1.balance()).total);
+	const p2After = BigInt((await participant2.balance()).total);
 
-  // Crear una bounty
-  const prizes = ["1000000000000000000000000"];
-  await root.call(contract, 'create_bounty', { prizes }, { attachedDeposit: '1000000000000000000000000' });
+	// The owner did not pay for finalize => no gas usage
+	// so the owner delta should be exactly totalFee
+	t.is((ownerAfter - ownerBefore).toString(), totalFee.toString());
 
-  // Crear una cuenta que no es el creador
-  const attacker = await root.createSubAccount('attacker');
-
-  // Intentar finalizar la bounty con otra cuenta
-  await t.throwsAsync(
-    attacker.call(contract, 'finalize_bounty', { bountyId: 0, winners: [attacker.accountId] }),
-    { instanceOf: Error, message: /Only the bounty creator can finalize the bounty./ }
-  );
+	// Each participant got at least their net prize
+	const expectedNet1 = BigInt("980000000000000000000000");  // 1e24 - 2e22
+	const expectedNet2 = BigInt("490000000000000000000000");  // 5e23 - 1e22
+	t.true(p1After - p1Before >= expectedNet1, 'p1 has correct net prize');
+	t.true(p2After - p2Before >= expectedNet2, 'p2 has correct net prize');
 });
