@@ -229,10 +229,33 @@ class Bountrip {
      */
     @view({})
     get_fee_info(): { owner: string; feePercentage: number } {
+        // near.log actúa como console.log dentro de NEAR
+        near.log(`get_fee_info() called. Current state -> owner = ${this.owner}, fee = ${this.feePercentage}`);
+
         return {
             owner: this.owner,
             feePercentage: this.feePercentage,
         };
+    }
+
+    @call({})
+    define_fee_percentage({newFee}: { newFee: number }): void {
+        // Requiere que haya un owner configurado (y que sea él quien llame).
+        assert(this.owner, 'Contract has no owner yet. Call set_owner first.');
+        assert(
+            near.predecessorAccountId() === this.owner,
+            `Only the owner (${this.owner}) can define the fee percentage.`
+        );
+
+        // Solo asigna si feePercentage está undefined (viene de un estado antiguo)
+        if (this.feePercentage === undefined) {
+            // Valida que sea un valor razonable (0..100)
+            assert(newFee >= 0 && newFee <= 100, 'Fee must be between 0 and 100');
+            this.feePercentage = newFee;
+            near.log(`feePercentage set to ${newFee}`);
+        } else {
+            near.log(`Fee is already set to ${this.feePercentage}; no changes made.`);
+        }
     }
 
     /**
